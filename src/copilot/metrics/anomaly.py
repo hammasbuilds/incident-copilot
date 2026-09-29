@@ -37,6 +37,12 @@ class Anomaly:
     at: float = 0.0
 
 
+def _validate_numeric(values: list[float], label: str = "values") -> None:
+    for i, v in enumerate(values):
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise ValueError(f"{label}[{i}] is not numeric (got {type(v).__name__} instead: {v!r})")
+
+
 def median_absolute_deviation(values: list[float]) -> float:
     if not values:
         return 0.0
@@ -60,6 +66,7 @@ def robust_z_scores(values: list[float]) -> list[float]:
 def detect_outliers(
     values: list[float], *, threshold: float = 3.0, series: str = ""
 ) -> list[Anomaly]:
+    _validate_numeric(values, label=series or "values")
     return [
         Anomaly(
             index=i,
@@ -83,6 +90,7 @@ def detect_seasonal(
     there is no "same time yesterday" to compare against, and guessing would produce
     exactly the false alarms this detector exists to prevent.
     """
+    _validate_numeric(values, label=series or "values")
     if period < 2 or len(values) < period * 2:
         return []
 
