@@ -12,7 +12,7 @@
 
 <p align="center">
   <a href="https://github.com/hammasbuilds/incident-copilot/actions/workflows/ci.yml"><img src="https://github.com/hammasbuilds/incident-copilot/actions/workflows/ci.yml/badge.svg" alt="ci"></a>
-  <img src="https://img.shields.io/badge/python-3.11%2B-blue" alt="python">
+  <img src="https://img.shields.io/badge/python-3.12-blue" alt="python">
   <img src="https://img.shields.io/badge/algorithms-implemented%2C%20not%20wrapped-success" alt="impl">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="license"></a>
 </p>
@@ -103,6 +103,13 @@ whenever it happens to straddle a boundary.
 **Only changes *before* the onset can be causes.** A change afterwards is a *response* —
 presenting the rollback as the cause sends the investigation backwards.
 
+**A `ChangeEvent` with no `service` set is treated as global.** `correlate()` attaches it
+to *any* incident in its lookback window regardless of which services are affected — the
+right behaviour for a genuinely infrastructure-wide change (a CDN config, a cluster
+upgrade), but a trap if you simply forgot to set `.service` on a per-service change: it
+will still show up as a candidate cause for unrelated incidents. Set `service` whenever
+the change is scoped to one service.
+
 **Severity comes from breadth before strength.** One metric at 10σ on one service is
 usually that service. Three services moving together is usually infrastructure.
 
@@ -121,19 +128,23 @@ Written up because they are the useful part, and all three would have survived r
 
 ## Tests
 
-**39 tests. No numpy, no services, no waiting for a real incident.**
+**49 tests. No numpy, no services, no waiting for a real incident.**
 
 ```bash
-make test
+make test          # or, without make (e.g. on Windows): uv run pytest -q
 ```
+
+No `make` on your machine? Nothing here depends on it — `make test`, `make lint` and
+`make fmt` are one-line wrappers, and `uv run pytest -q`, `uv run ruff check src tests`,
+`uv run ruff format src tests` do exactly the same thing.
 
 | Covered | |
 |---|---|
-| Masking | IPs, UUIDs, hex, timestamps, durations, emails, paths |
-| Drain | collapsing, separating, wildcards, bounded examples, unseen shapes, empty input |
+| Masking | IPs, UUIDs, hex, timestamps, durations, emails, Unix and Windows paths, scientific notation |
+| Drain | collapsing, separating, wildcards, bounded examples, unseen shapes, empty input, bad input |
 | Robust stats | spike self-concealment, MAD vs outliers, constant series, short series |
-| Detection | spikes, drops, normal variation, relative-change floor, no double-reporting |
-| Seasonality | daily pattern not flagged, broken pattern caught, insufficient cycles |
+| Detection | spikes, drops, normal variation, relative-change floor, no double-reporting, bad input |
+| Seasonality | daily pattern not flagged, broken pattern caught, insufficient cycles, bad input |
 | Correlation | grouping, gaps, cause ordering, post-onset exclusion, service scoping |
 | Severity | breadth over strength, operator-readable summary |
 
@@ -176,7 +187,8 @@ git clone https://github.com/hammasbuilds/incident-copilot
 cd incident-copilot
 
 uv sync --all-groups     # or: pip install -e ".[dev]"
-make test                # 43 tests, no numpy, no services
+make test                # 49 tests, no numpy, no services
+                          # no make on Windows? uv run pytest -q does the same thing
 ```
 
 ```python
@@ -198,6 +210,17 @@ incidents = correlate(signals, changes=[
     ChangeEvent(at=deploy_time, kind="deploy", description="api v2.3", service="api"),
 ])
 incidents[0].summary()
+```
+
+Real telemetry has holes in it. A `None` in a batch of log lines, or a stray string in a
+metric series, raises a `TypeError`/`ValueError` naming the offending index rather than
+failing deep inside a `.strip()` or a division:
+
+```python
+>>> DrainParser().parse(["a real line", None])
+TypeError: log line 1 is not a str (got NoneType instead: None); DrainParser.parse() expects an iterable of strings
+>>> Detector().detect("qps", [1.0, 2.0, "oops"])
+ValueError: qps[2] is not numeric (got str instead: 'oops')
 ```
 
 ---
