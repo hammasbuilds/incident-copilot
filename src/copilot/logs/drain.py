@@ -36,13 +36,21 @@ _MASKS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\b0x[0-9a-f]+\b", re.I), "<HEX>"),
     (re.compile(r"\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}\S*"), "<TS>"),
     (re.compile(r"\b\d+(?:\.\d+)?(?:ms|s|kb|mb|gb|%)\b", re.I), "<NUM>"),
-    (re.compile(r"(?<![\w.])\d+(?:\.\d+)?(?![\w.])"), "<NUM>"),
+    # Plain numbers, including scientific notation (1.5e10) - without the exponent
+    # part a value like that was left completely unmasked.
+    (re.compile(r"(?<![\w.])\d+(?:\.\d+)?(?:[eE][+-]?\d+)?(?![\w.])"), "<NUM>"),
     (re.compile(r"\b[\w.]+@[\w.]+\.\w+\b"), "<EMAIL>"),
     (re.compile(r"(/[\w.\-]+){2,}"), "<PATH>"),
+    # Windows-style paths (C:\Users\ops\app.log). Without this, a username or
+    # hostname embedded in a Windows path leaked straight into the template and
+    # lines differing only by that path never collapsed.
+    (re.compile(r"\b[A-Za-z]:(?:\\[\w.\-]+)+"), "<PATH>"),
 ]
 
 
 def mask(line: str) -> str:
+    if not isinstance(line, str):
+        raise TypeError(f"mask() expects a str, got {type(line).__name__} instead: {line!r}")
     for pattern, token in _MASKS:
         line = pattern.sub(token, line)
     return line
@@ -122,6 +130,10 @@ class DrainParser:
         return node["__leaf__"]
 
     def add(self, line: str) -> Template:
+        if not isinstance(line, str):
+            raise TypeError(
+                f"DrainParser.add() expects a str, got {type(line).__name__} instead: {line!r}"
+            )
         tokens = self._tokenise(line)
         leaf = self._leaf(tokens, create=True)
         assert leaf is not None
@@ -146,7 +158,12 @@ class DrainParser:
         return template
 
     def parse(self, lines: list[str]) -> list[Template]:
-        for line in lines:
+        for i, line in enumerate(lines):
+            if not isinstance(line, str):
+                raise TypeError(
+                    f"log line {i} is not a str (got {type(line).__name__} instead: "
+                    f"{line!r}); DrainParser.parse() expects an iterable of strings"
+                )
             if line.strip():
                 self.add(line)
         return self.templates()
