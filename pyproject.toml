@@ -7,6 +7,12 @@ requires-python = ">=3.12,<3.13"
 # No numpy, no scipy. These are medians and subtractions.
 dependencies = []
 
+[project.optional-dependencies]
+# Duplicated from [dependency-groups] below: `pip install -e ".[dev]"` only understands
+# PEP 621 optional-dependencies, not PEP 735 dependency-groups, so both need the list or
+# the pip-only fallback silently installs nothing.
+dev = ["pytest>=8.3", "ruff>=0.8"]
+
 [dependency-groups]
 dev = ["pytest>=8.3", "ruff>=0.8"]
 
