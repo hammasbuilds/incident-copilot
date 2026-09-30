@@ -6,8 +6,7 @@
   <a href="#metrics-the-mean-and-standard-deviation-hide-the-thing-you-are-looking-for">Metrics</a> &middot;
   <a href="#correlation-one-deploy-one-incident-one-page">Correlation</a> &middot;
   <a href="#three-bugs-the-tests-caught-on-first-run">Three bugs</a> &middot;
-  <a href="#limits">Limits</a> &middot;
-  <a href="#problems-hit-while-building-this">Problems hit</a>
+  <a href="#limits">Limits</a> 
 </p>
 
 <p align="center">
@@ -243,34 +242,3 @@ of this.
 `window_seconds`, so an alert stream arriving steadily faster than the window collapses
 into one incident regardless of service — a real property worth knowing before trusting
 any "40 alarms became 1" claim, including this one.*
-
-## Problems hit while building this
-
-**A traffic drop to zero was reported as a spike.** On a series that is almost constant,
-the median absolute deviation is zero, so the code took a special branch — and that
-branch returned a fixed positive score, losing the *sign*. An outage arrived labelled
-`direction="high"`. *Fixed* by carrying the sign through the constant-series case, with
-a test asserting a drop is detected as a drop.
-
-**The cleanest possible break in a seasonal pattern was the one case that went
-undetected.** A perfectly regular daily pattern has zero variance at each phase, so the
-seasonal detector hit a divide-by-zero guard and skipped the point entirely — meaning
-the more reliable the pattern, the less able it was to notice the pattern breaking.
-*Fixed* by treating any departure from a zero-variance phase as the signal it obviously
-is.
-
-**Short log lines could never form a template.** The parse tree used the first few
-tokens as branch keys, which for a three-word line consumed the entire line — so
-`service alpha restarted` and `service beta restarted` landed in different leaves and no
-generalisation was possible. *Fixed* by stopping the prefix short of the full line.
-
-All three passed a read-through and failed the first real run.
-
-**`fastapi`, `uvicorn`, `pydantic`, `rich`, and `typer` were declared as core
-dependencies since the repo's first commit and imported nowhere** — grepped `src/` and
-`tests/` for every one of them to be sure before touching anything. There was also an
-empty `src/copilot/api/` folder, presumably scaffolding for a service that was never
-built. *Fixed* by removing all five from `dependencies` and deleting the empty folder —
-the actual gap was the declared-but-unbuilt `ui` Streamlit demo, since replaced by
-`demo.py`, not a REST
-API this project never needed in the first place.
