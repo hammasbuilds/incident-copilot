@@ -384,3 +384,13 @@ class TestDrainVariableWords:
             ]
         )
         assert len(out) == 4
+
+
+def test_readme_python_example_runs_verbatim(capsys):
+    """The README example used to reference undefined names; it must paste and run."""
+    from pathlib import Path
+
+    text = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
+    start = text.index("```python\nimport random") + len("```python\n")
+    exec(compile(text[start : text.index("```", start)], "README.md", "exec"), {})
+    assert "user <*> logged in from <IP>" in capsys.readouterr().out

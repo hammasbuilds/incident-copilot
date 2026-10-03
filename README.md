@@ -44,6 +44,17 @@ Connection to db-9 failed after 88ms
     →  Connection to db-<NUM> failed after <NUM>        ×3
 ```
 
+`python bench.py` (200,000 synthetic lines, five shapes, random usernames/ids/numbers):
+
+```
+200,000 lines -> 5 templates in 19.2s
+  x40259  user <*> logged in from <IP>
+  x40232  worker <NUM> restarted after <NUM> retries
+  x40107  GET <PATH>/<NUM> <NUM> <NUM>
+  x39797  Connection to db-<NUM> failed after <NUM>
+  x39605  cache miss for key=<*> shard=<NUM>
+```
+
 Nobody can read a million lines. Everybody can read *"this template fired 40,000 times
 today and has never fired before"*.
 
@@ -73,6 +84,22 @@ without it alerts every morning when traffic arrives — which is how alerting g
 switched off. Seasonal comparison checks a point against the same phase of previous
 cycles, and stays silent until it has seen two complete ones, because with a single
 cycle there is no "same time yesterday" to compare against.
+
+**The seasonal scale is pooled.** A per-phase MAD from two weeks of hourly data rests on
+at most 13 samples (2-3 in the first cycles) and collapses towards zero on plain noise;
+an earlier version scored a 1.8-sigma wobble at 14.5 and, in the worst seed, 100,000.
+The scale is now floored by the median absolute residual pooled over every phase, and
+when `period` is set the global outlier test runs on the series with each phase's median
+removed. Over 200 seeds of 336 hourly points (day/night baseline 100/110, Gaussian sd 2):
+
+| `Detector(threshold=3, period=24)` | false positives per point | per 14-day series | worst seasonal score |
+|---|---:|---:|---:|
+| before | 0.97% | 3.25 | 100,975 |
+| after | 0.15% | 0.50 | 4.3 |
+
+A missing daily peak (-10, i.e. 5 sigma) on the last day is still caught in 100/100 seeds,
+and NaN, infinite or empty input raises a `ValueError` naming the index instead of
+returning an all-clear `[]`.
 
 **Drops are anomalies too.** Traffic falling to zero is an outage, and a one-sided
 detector misses it entirely.
@@ -127,7 +154,7 @@ Written up because they are the useful part, and all three would have survived r
 
 ## Tests
 
-**49 tests. No numpy, no services, no waiting for a real incident.**
+**59 tests. No numpy, no services, no waiting for a real incident.**
 
 ```bash
 make test          # or, without make (e.g. on Windows): uv run pytest -q
@@ -140,10 +167,10 @@ No `make` on your machine? Nothing here depends on it — `make test`, `make lin
 | Covered | |
 |---|---|
 | Masking | IPs, UUIDs, hex, timestamps, durations, emails, Unix and Windows paths, scientific notation |
-| Drain | collapsing, separating, wildcards, bounded examples, unseen shapes, empty input, bad input |
+| Drain | usernames in the routing prefix, `key=<*>`, no over-merging, collapsing, separating, wildcards, bounded examples, unseen shapes, empty input, bad input |
 | Robust stats | spike self-concealment, MAD vs outliers, constant series, short series |
 | Detection | spikes, drops, normal variation, relative-change floor, no double-reporting, bad input |
-| Seasonality | daily pattern not flagged, broken pattern caught, insufficient cycles, bad input |
+| Seasonality | daily pattern not flagged, broken pattern caught, insufficient cycles, bad input, false-positive rate over 100 seeds of pure noise, NaN/empty input |
 | Correlation | grouping, gaps, cause ordering, post-onset exclusion, service scoping |
 | Severity | breadth over strength, operator-readable summary |
 
@@ -163,8 +190,11 @@ demo.py                   40 alerts in, one incident out
   preceded them*, which is a lead, not a diagnosis. An operator woken at 3am needs to
   be able to check the reasoning, and a correlation they cannot check is one they will
   not trust.
-- Drain's parse tree assumes the leading tokens are usually constant. Logs that vary in
-  position one fragment more than they should.
+- Drain's parse tree routes on the leading tokens. When a variable word lands there
+  (`user alice logged in`, `user=bob ...`) and the leaf has no match, the parser falls back
+  to every template of the same length, so these collapse into `user <*> ...` /
+  `user=<*> ...`; a miss costs a scan of those templates. Lines of different token counts
+  never merge.
 - Seasonality handles one period. Daily-and-weekly together needs decomposition.
 - No LLM in the core. Narrative generation belongs on top of these signals, not inside
   them — the detection has to be explainable on its own.
@@ -186,30 +216,57 @@ git clone https://github.com/hammasbuilds/incident-copilot
 cd incident-copilot
 
 uv sync --all-groups     # or: pip install -e ".[dev]"
-make test                # 49 tests, no numpy, no services
+make test                # 59 tests, no numpy, no services
                           # no make on Windows? uv run pytest -q does the same thing
 ```
 
 ```python
+import random
+
+from copilot.correlate import ChangeEvent, Signal, correlate
 from copilot.logs import DrainParser
 from copilot.metrics import Detector
-from copilot.correlate import ChangeEvent, Signal, correlate
 
-# a million log lines -> a few hundred templates
+# logs -> templates
+log_lines = [f"user {u} logged in from 10.0.0.{i}" for i, u in enumerate(["ali", "zoë", "bob"])]
+log_lines += [f"Connection to db-{n} failed after {ms}ms" for n, ms in [(7, 3021), (2, 1180)]]
 parser = DrainParser()
 for template in parser.parse(log_lines):
     print(f"x{template.count}  {template.text}")
-parser.match(new_line)        # None means a shape never seen before
+print(parser.match("kernel panic on cpu 3"))  # None: a shape never seen before
 
-# metrics: robust to the outliers you are looking for
-Detector(threshold=3.0, period=24).detect("qps", hourly_values)
+# metrics: two weeks of hourly qps, day/night baseline, noise, one spike
+rng = random.Random(0)
+hourly_values = [100 + 10 * ((h % 24) > 8) + rng.gauss(0, 2) for h in range(336)]
+hourly_values[300] = 400.0
+for a in Detector(threshold=3.0, period=24).detect("qps", hourly_values):
+    print(a.index, a.direction, a.score, a.detector)
 
-# forty alarms -> one incident with a suspect
+# alarms + a deploy -> one incident with a suspect
+deploy_time = 1_700_000_000.0
+signals = [
+    Signal(at=deploy_time + 60, service="api", kind="metric", detail="errors 0.4% -> 11%", score=9.0),
+    Signal(at=deploy_time + 90, service="db", kind="metric", detail="pool exhausted", score=6.0),
+]
 incidents = correlate(signals, changes=[
     ChangeEvent(at=deploy_time, kind="deploy", description="api v2.3", service="api"),
 ])
-incidents[0].summary()
+print(incidents[0].summary())
 ```
+
+Output (copied from a run):
+
+```
+x3  user <*> logged in from <IP>
+x2  Connection to db-<NUM> failed after <NUM>
+None
+219 low 3.255 robust_z
+300 high 159.577 robust_z
+{'started_at': 1700000060.0, 'services': ['api', 'db'], 'signals': 2, 'severity': 'high', 'causes': ['deploy: api v2.3'], 'top_signals': ['api: errors 0.4% -> 11% (score 9.0)', 'db: pool exhausted (score 6.0)']}
+```
+
+Index 219 is a 3.3-sigma noise point, left in on purpose: at `threshold=3.0` the detector
+flags about 0.15% of pure-noise points (see Metrics), which is what a 3-sigma threshold means.
 
 Real telemetry has holes in it. A `None` in a batch of log lines, or a stray string in a
 metric series, raises a `TypeError`/`ValueError` naming the offending index rather than
@@ -235,6 +292,27 @@ of this.
 ## Output
 
 `python demo.py`
+
+```
+INPUT
+   40 alerts across 7 services
+   2 change events in the lookback window
+
+OUTPUT
+   40 alerts -> 1 correlated incident, 34 unrelated singletons
+
+   severity=critical   6 alerts   services=checkout, ledger, payments
+      +  60s  checkout  metric error_rate 0.4% -> 11.2%
+      +  62s  checkout  log    NullPointerException in PaymentClient
+      +  75s  checkout  metric p99 latency 180ms -> 4200ms
+      +  90s  payments  metric connection_pool_exhausted
+      +  95s  payments  log    timeout awaiting connection
+      + 120s  ledger    metric write_queue_depth 12 -> 3100
+      SUSPECT   deploy: checkout v4.12.0  (+30s)
+
+   The other 34 alerts stayed separate. They are background noise,
+   and nothing in the correlator was told which was which.
+```
 
 ![output](docs/images/output.png)
 
