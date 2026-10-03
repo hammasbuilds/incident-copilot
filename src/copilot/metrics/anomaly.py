@@ -18,6 +18,8 @@ dependency for arithmetic.
 
 from __future__ import annotations
 
+import bisect
+import math
 import statistics
 from dataclasses import dataclass, field
 
@@ -41,6 +43,14 @@ def _validate_numeric(values: list[float], label: str = "values") -> None:
     for i, v in enumerate(values):
         if isinstance(v, bool) or not isinstance(v, (int, float)):
             raise ValueError(f"{label}[{i}] is not numeric (got {type(v).__name__} instead: {v!r})")
+        if not math.isfinite(v):
+            # NaN poisons every median and comparison: an all-NaN series used to
+            # come back as "no anomalies", which reads as "all clear".
+            raise ValueError(
+                f"{label}[{i}] is {v!r}; drop or fill missing points before detection"
+            )
+    if not values:
+        raise ValueError(f"{label} is empty; there is nothing to detect anomalies in")
 
 
 def median_absolute_deviation(values: list[float]) -> float:
@@ -94,41 +104,47 @@ def detect_seasonal(
     if period < 2 or len(values) < period * 2:
         return []
 
+    # Scale: the per-phase MAD alone is estimated from only a handful of cycles
+    # (two weeks of hourly data gives at most 13 samples per phase, and the first
+    # cycles give 2-3). On plain Gaussian noise that MAD regularly collapses towards
+    # zero and a 1.8-sigma wobble scored 14 - or 100,000 with two samples. So the
+    # scale is floored by a pooled one: the median absolute residual of every
+    # earlier point against its own phase median, which is estimated from all
+    # phases together and is stable after a single cycle.
+    pooled: list[float] = []  # sorted |residuals| of earlier points
     found: list[Anomaly] = []
     for i in range(period, len(values)):
         history = values[i % period : i : period]
-        if len(history) < 2:
-            continue
         med = statistics.median(history)
-        mad = median_absolute_deviation(history)
-        if mad == 0:
-            # A perfectly regular phase. Any departure is the signal - and
-            # skipping here would miss the cleanest possible break.
-            if values[i] != med:
+        residual = values[i] - med
+        if len(history) >= 2 and pooled:
+            phase_scale = median_absolute_deviation(history) * _MAD_TO_SIGMA
+            pooled_scale = _sorted_median(pooled) * _MAD_TO_SIGMA
+            scale = max(phase_scale, pooled_scale)
+            if scale == 0:
+                # Perfectly regular history everywhere. Any departure is the
+                # signal - skipping here would miss the cleanest possible break.
+                z = 0.0 if residual == 0 else (10.0 if residual > 0 else -10.0)
+            else:
+                z = residual / scale
+            if abs(z) >= threshold:
                 found.append(
                     Anomaly(
                         index=i,
                         value=values[i],
-                        score=10.0,
-                        direction="high" if values[i] > med else "low",
+                        score=round(abs(z), 3),
+                        direction="high" if z > 0 else "low",
                         detector="seasonal",
                         series=series,
                     )
                 )
-            continue
-        z = (values[i] - med) / (mad * _MAD_TO_SIGMA)
-        if abs(z) >= threshold:
-            found.append(
-                Anomaly(
-                    index=i,
-                    value=values[i],
-                    score=round(abs(z), 3),
-                    direction="high" if z > 0 else "low",
-                    detector="seasonal",
-                    series=series,
-                )
-            )
+        bisect.insort(pooled, abs(residual))
     return found
+
+
+def _sorted_median(xs: list[float]) -> float:
+    n = len(xs)
+    return xs[n // 2] if n % 2 else (xs[n // 2 - 1] + xs[n // 2]) / 2
 
 
 @dataclass
@@ -142,7 +158,27 @@ class Detector:
 
     def detect(self, series: str, values: list[float]) -> list[Anomaly]:
         self.history[series] = values
-        found = detect_outliers(values, threshold=self.threshold, series=series)
+        if self.period and self.period >= 2 and len(values) >= self.period * 2:
+            # On a seasonal series the whole-series median/MAD describe a mixture of
+            # day and night levels, so ordinary noise near the low level scores past
+            # 3. Score the global outlier test on the series with each phase's
+            # median removed instead; values are reported unchanged.
+            _validate_numeric(values, label=series or "values")
+            phase_med = [statistics.median(values[p :: self.period]) for p in range(self.period)]
+            resid = [v - phase_med[i % self.period] for i, v in enumerate(values)]
+            found = [
+                Anomaly(
+                    index=a.index,
+                    value=values[a.index],
+                    score=a.score,
+                    direction=a.direction,
+                    detector="robust_z",
+                    series=series,
+                )
+                for a in detect_outliers(resid, threshold=self.threshold, series=series)
+            ]
+        else:
+            found = detect_outliers(values, threshold=self.threshold, series=series)
         if self.period:
             seen = {a.index for a in found}
             found += [

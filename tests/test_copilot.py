@@ -300,3 +300,52 @@ class TestSeverity:
         assert s["services"] == ["api"]
         assert "deploy: api v2.3" in s["causes"]
         assert "latency high" in s["top_signals"][0]
+
+
+class TestSeasonalNoise:
+    @staticmethod
+    def _noise(seed: int) -> list[float]:
+        import random
+
+        r = random.Random(seed)
+        return [100 + 10 * ((h % 24) > 8) + r.gauss(0, 2) for h in range(336)]
+
+    def test_pure_noise_stays_quiet_across_seeds(self):
+        """Two weeks of hourly noise around a day/night baseline. Before the pooled
+        scale floor the per-phase MAD from 2-13 samples collapsed and noise scored
+        up to 100,000; the false-positive rate must stay at or below the Gaussian
+        3-sigma tail (0.27% per point)."""
+        points = fps = 0
+        worst = 0.0
+        for seed in range(100):
+            values = self._noise(seed)
+            found = Detector(threshold=3.0, period=24).detect("qps", values)
+            points += len(values)
+            fps += len(found)
+            worst = max([worst] + [a.score for a in detect_seasonal(values, period=24)])
+        assert fps / points <= 0.0027
+        assert worst < 6
+
+    def test_a_spike_on_noisy_seasonal_data_is_found(self):
+        values = self._noise(1)
+        values[300] = 400.0
+        found = Detector(threshold=3.0, period=24).detect("qps", values)
+        assert any(a.index == 300 and a.score > 20 for a in found)
+
+    def test_a_missing_peak_on_noisy_data_is_caught(self):
+        for seed in range(20):
+            values = self._noise(seed)
+            for h in range(321, 330):
+                values[h] -= 10.0  # the last day's peak did not happen
+            found = detect_seasonal(values, period=24)
+            assert any(321 <= a.index < 330 and a.direction == "low" for a in found)
+
+
+class TestMissingValues:
+    def test_all_nan_raises_instead_of_reporting_all_clear(self):
+        with pytest.raises(ValueError, match=r"\[0\]"):
+            Detector().detect("cpu", [float("nan")] * 10)
+
+    def test_empty_series_raises(self):
+        with pytest.raises(ValueError, match="empty"):
+            detect_outliers([])
