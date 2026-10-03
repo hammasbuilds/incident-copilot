@@ -74,12 +74,32 @@ class Template:
             return 0.0
         if not tokens:
             return 1.0
-        same = sum(1 for a, b in zip(self.tokens, tokens, strict=False) if a in (b, WILDCARD))
+        same = sum(1 for a, b in zip(self.tokens, tokens, strict=False) if _covers(a, b))
         return same / len(tokens)
 
     def merge(self, tokens: list[str]) -> None:
-        """Generalise positions that disagree into wildcards."""
-        self.tokens = [a if a == b else WILDCARD for a, b in zip(self.tokens, tokens, strict=False)]
+        """Generalise positions that disagree into wildcards. `key=a` and `key=b`
+        generalise to `key=<*>`, keeping the key readable."""
+        self.tokens = [_generalise(a, b) for a, b in zip(self.tokens, tokens, strict=False)]
+
+
+_KEY = re.compile(r"^([\w.\-]+[=:])(.+)$")
+
+
+def _covers(pattern: str, token: str) -> bool:
+    if pattern in (token, WILDCARD):
+        return True
+    m = _KEY.match(pattern)
+    return bool(m and m.group(2) == WILDCARD and token.startswith(m.group(1)))
+
+
+def _generalise(a: str, b: str) -> str:
+    if _covers(a, b):
+        return a
+    ka, kb = _KEY.match(a), _KEY.match(b)
+    if ka and kb and ka.group(1) == kb.group(1):
+        return ka.group(1) + WILDCARD
+    return WILDCARD
 
 
 @dataclass
@@ -144,6 +164,17 @@ class DrainParser:
             if score > best_score:
                 best, best_score = template, score
 
+        if best is None or best_score < self.similarity_threshold:
+            # The tree routes on the first few tokens, so a variable word there
+            # (`user alice logged in`, `user=bob ...`) sends each value to its own
+            # leaf and every username became its own template. On a miss, look at
+            # every template of the same length; a match is linked into this leaf
+            # too, so the next line with that value is found directly.
+            fallback, fallback_score = self._best_same_length(tokens)
+            if fallback is not None and fallback_score >= self.similarity_threshold:
+                best, best_score = fallback, fallback_score
+                leaf.append(best)
+
         if best is not None and best_score >= self.similarity_threshold:
             best.merge(tokens)
             best.count += 1
@@ -175,12 +206,23 @@ class DrainParser:
         """Find the template for a line without creating one. Used to detect a line
         whose shape has never been seen before - often the first sign of a new fault."""
         tokens = self._tokenise(line)
-        leaf = self._leaf(tokens, create=False)
-        if not leaf:
-            return None
+        leaf = self._leaf(tokens, create=False) or []
         best, best_score = None, 0.0
         for template in leaf:
             score = template.similarity(tokens)
             if score > best_score:
                 best, best_score = template, score
+        if best_score < self.similarity_threshold:
+            best, best_score = self._best_same_length(tokens)
         return best if best_score >= self.similarity_threshold else None
+
+    def _best_same_length(self, tokens: list[str]) -> tuple[Template | None, float]:
+        best, best_score = None, 0.0
+        for template in self._templates.values():
+            if len(template.tokens) != len(tokens):
+                continue
+            score = template.similarity(tokens)
+            # Ties go to the older template, keeping assignment stable.
+            if score > best_score:
+                best, best_score = template, score
+        return best, best_score

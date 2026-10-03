@@ -349,3 +349,38 @@ class TestMissingValues:
     def test_empty_series_raises(self):
         with pytest.raises(ValueError, match="empty"):
             detect_outliers([])
+
+
+class TestDrainVariableWords:
+    def test_usernames_in_the_routing_prefix_collapse_to_one_template(self):
+        """Usernames sit in the first tokens the tree routes on, so each one used to
+        get its own leaf and its own template - including non-ASCII names."""
+        p = DrainParser()
+        names = ["ali", "zoë", "عمران", "bob", "carol"]
+        out = p.parse([f"user {n} logged in from 10.0.0.{i}" for i, n in enumerate(names)])
+        assert len(out) == 1
+        assert out[0].text == "user <*> logged in from <IP>"
+        assert p.match("user dave logged in from 10.0.0.99") is out[0]
+
+    def test_for_user_shape_collapses(self):
+        p = DrainParser()
+        out = p.parse([f"Accepted password for user {n} from 1.2.3.4" for n in "abcde"])
+        assert [t.text for t in out] == ["Accepted password for user <*> from <IP>"]
+
+    def test_key_value_identifiers_keep_their_key(self):
+        p = DrainParser()
+        out = p.parse([f"user={n} action=login ok" for n in ["alice", "bob", "carol"]])
+        assert [t.text for t in out] == ["user=<*> action=login ok"]
+
+    def test_different_messages_of_the_same_length_stay_apart(self):
+        p = DrainParser()
+        out = p.parse(
+            [
+                "user alice logged in from 10.0.0.1",
+                "user bob logged in from 10.0.0.2",
+                "disk sda1 is nearly full now",
+                "cache warmup finished in 3s total",
+                "worker 7 crashed with signal 11",
+            ]
+        )
+        assert len(out) == 4
