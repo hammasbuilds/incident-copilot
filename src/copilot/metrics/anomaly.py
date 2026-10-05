@@ -46,9 +46,7 @@ def _validate_numeric(values: list[float], label: str = "values") -> None:
         if not math.isfinite(v):
             # NaN poisons every median and comparison: an all-NaN series used to
             # come back as "no anomalies", which reads as "all clear".
-            raise ValueError(
-                f"{label}[{i}] is {v!r}; drop or fill missing points before detection"
-            )
+            raise ValueError(f"{label}[{i}] is {v!r}; drop or fill missing points before detection")
     if not values:
         raise ValueError(f"{label} is empty; there is nothing to detect anomalies in")
 
